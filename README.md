@@ -1,1 +1,1 @@
-
+IHIS (Integrated Hospital Information System) is a centralized healthcare management platform that integrates patient records, appointments, clinical services, laboratory, pharmacy, billing, inventory, procurement, and hospital administration into one secure and efficient digital system.

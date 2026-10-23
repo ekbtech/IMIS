@@ -1,0 +1,1 @@
+DROP TABLE department_role_assignments;

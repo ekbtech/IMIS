@@ -1,0 +1,1551 @@
+openapi: 3.1.0
+info:
+  title: IMIS API
+  version: 0.1.0
+  description: >
+    Contract for implemented authentication, access administration, initial
+    facility-scoped MPI, encounter workflows, controlled clinical notes,
+    disabled triage capture/review, department task routing, and diagnostics,
+    inpatient and finance scaffolds. It includes audited organization
+    administration; role activation requires explicit permissions and enables
+    MFA. Departments can be organized into Hospital, Budget, Inventory,
+    Procurement, HR, Finance, Administration, System tools, Morgue and
+    Reports groups. Grouping is for navigation and does not activate services.
+    The department catalogue is synthetic and demo-only. Triage records
+    observations only; this is not a complete clinical or production API.
+servers:
+  - url: http://localhost:4000/api/v1
+paths:
+  /auth/login:
+    post:
+      summary: Create a server-side session
+      description: Requires the configured web Origin. Session token is only returned as an HttpOnly cookie.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username: { type: string, minLength: 1, maxLength: 100 }
+                password: { type: string, minLength: 1, maxLength: 1024, writeOnly: true }
+                otp: { type: string, pattern: '^[0-9]{6}$' }
+      responses:
+        "200":
+          description: Session established
+          headers:
+            Set-Cookie:
+              schema: { type: string }
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user:
+                    type: object
+                    properties:
+                      id: { type: integer }
+                      username: { type: string }
+                      displayName: { type: string }
+                      mfaRequired: { type: boolean }
+        "400": { description: Invalid request }
+        "401": { description: Credentials or MFA code incorrect }
+        "403": { description: Origin not permitted }
+        "429": { description: Too many attempts }
+  /auth/me:
+    get:
+      summary: Return the signed-in user's access context
+      security: [{ sessionCookie: [] }]
+      responses:
+        "200": { description: Authenticated user, assigned permissions, and security state }
+        "401": { description: Missing or expired session }
+  /auth/change-password:
+    post:
+      summary: Change the signed-in user's password
+      security: [{ sessionCookie: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [currentPassword, newPassword]
+              properties:
+                currentPassword: { type: string, writeOnly: true }
+                newPassword: { type: string, minLength: 16, maxLength: 1024, writeOnly: true }
+      responses:
+        "200": { description: Password changed; temporary-password requirement cleared }
+        "400": { description: Invalid request }
+        "401": { description: Session or current password invalid }
+  /auth/logout:
+    post:
+      summary: Revoke the current session
+      security: [{ sessionCookie: [] }]
+      responses:
+        "204": { description: Session revoked }
+        "401": { description: Missing or expired session }
+  /auth/mfa/enrollment/start:
+    post:
+      summary: Begin MFA enrollment for the signed-in user
+      description: Returns a one-time setup secret and otpauth URI; response is not cacheable.
+      security: [{ sessionCookie: [] }]
+      responses:
+        "201": { description: Enrollment secret issued with a ten-minute expiry }
+        "409": { description: MFA is already enabled }
+        "503": { description: Encryption key is not configured }
+  /auth/mfa/enrollment/verify:
+    post:
+      summary: Confirm MFA enrollment
+      security: [{ sessionCookie: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/MfaCode" }
+      responses:
+        "200": { description: MFA enabled and current session verified }
+        "401": { description: Code invalid or expired }
+        "409": { description: Enrollment expired or unavailable }
+  /auth/mfa/verify:
+    post:
+      summary: Verify MFA for the current session
+      security: [{ sessionCookie: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/MfaCode" }
+      responses:
+        "200": { description: MFA verified for current session }
+        "401": { description: Code invalid, expired, or already used }
+        "409": { description: MFA is not enabled }
+  /admin/facilities:
+    get:
+      summary: List active facilities for staff administration
+      security: [{ sessionCookie: [] }]
+      responses:
+        "200": { description: Active facilities; requires security.user.manage }
+        "403": { description: Permission, MFA, or password-change gate denied access }
+  /admin/roles:
+    get:
+      summary: List active roles available for staff provisioning
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - in: query
+          name: facilityId
+          schema: { type: integer, minimum: 1 }
+        - in: query
+          name: departmentId
+          description: Requires facilityId; limits mapped roles to this active department.
+          schema: { type: integer, minimum: 1 }
+      responses:
+        "200": { description: Active non-system-administrator roles, optionally filtered by facility and department; requires security.user.manage }
+        "400": { description: Invalid department or missing facility filter }
+        "404": { description: Department not active in the selected facility }
+        "403": { description: Permission, MFA, or password-change gate denied access }
+  /departments/workspaces:
+    get:
+      summary: List department workspaces visible to the signed-in user
+      description: Administrators with security.role.manage see all active departments and mapped roles. Other users see only assigned active departments and mapped active roles assigned to them.
+      security: [{ sessionCookie: [] }]
+      responses:
+        "200": { description: Access-filtered department workspace summaries }
+        "401": { description: Missing or expired session }
+        "403": { description: Password-change or MFA gate denied access }
+  /departments/workspaces/{facilityId}/{departmentId}:
+    get:
+      summary: Read an active department workspace
+      description: Administrators with security.role.manage can inspect all active department roles; staff can read only assigned departments and roles they hold there. Department mapping does not grant role permissions.
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - in: path
+          name: facilityId
+          required: true
+          schema: { type: integer, minimum: 1 }
+        - in: path
+          name: departmentId
+          required: true
+          schema: { type: integer, minimum: 1 }
+      responses:
+        "200": { description: Department details, visible role assignments and caller permission context }
+        "400": { description: Invalid facility or department identifier }
+        "401": { description: Missing or expired session }
+        "403": { description: Password-change, MFA, facility or department access denied }
+        "404": { description: Active department not found }
+  /admin/config/departments:
+    get:
+      summary: List department and resource units for a facility
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - in: query
+          name: facilityId
+          required: true
+          schema: { type: integer, minimum: 1 }
+      responses:
+        "200": { description: Facility-scoped catalogue; requires security.role.manage }
+        "400": { description: Invalid facility identifier }
+        "403": { description: Permission, MFA, or password-change gate denied access }
+    post:
+      summary: Add a department or resource unit
+      security: [{ sessionCookie: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [facilityId, departmentCode, name]
+              properties:
+                facilityId: { type: integer, minimum: 1 }
+                departmentCode: { type: string, pattern: '^[A-Z0-9_]{2,64}$' }
+                name: { type: string, minLength: 2, maxLength: 190 }
+                departmentGroup: { type: string, enum: [hospital, budget, inventory, procurement, hr, finance, administration, system_tools, morgue, reports], default: hospital }
+                hospitalSubgroup:
+                  type: [string, "null"]
+                  enum: [outpatient, emergency, inpatient, maternity, specialty_clinics, diagnostics, treatment_support, other, null]
+                  description: Required for Hospital departments; null for all other groups.
+                unitType: { type: string, enum: [department, ward, clinic, store, service_unit, other] }
+                parentDepartmentId: { type: [integer, "null"], minimum: 1 }
+                displayOrder: { type: integer, minimum: 0, maximum: 65535 }
+      responses:
+        "201": { description: Department created and audit event recorded }
+        "400": { description: Invalid details or parent unit }
+        "403": { description: Permission, MFA, or password-change gate denied access }
+        "409": { description: Department code already exists at the facility }
+  /admin/config/departments/{departmentId}:
+    put:
+      summary: Update or deactivate a department/resource unit
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - in: path
+          name: departmentId
+          required: true
+          schema: { type: integer, minimum: 1 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, departmentGroup, hospitalSubgroup, unitType, parentDepartmentId, displayOrder, status]
+              properties:
+                name: { type: string, minLength: 2, maxLength: 190 }
+                departmentGroup: { type: string, enum: [hospital, budget, inventory, procurement, hr, finance, administration, system_tools, morgue, reports] }
+                hospitalSubgroup:
+                  type: [string, "null"]
+                  enum: [outpatient, emergency, inpatient, maternity, specialty_clinics, diagnostics, treatment_support, other, null]
+                  description: Required for Hospital departments; null for all other groups.
+                unitType: { type: string, enum: [department, ward, clinic, store, service_unit, other] }
+                parentDepartmentId: { type: [integer, "null"], minimum: 1 }
+                displayOrder: { type: integer, minimum: 0, maximum: 65535 }
+                status: { type: string, enum: [active, inactive] }
+      responses:
+        "200": { description: Department updated and audit event recorded }
+        "400": { description: Invalid details, parent, or hierarchy cycle }
+        "403": { description: Permission, MFA, or password-change gate denied access }
+        "404": { description: Department not found }
+        "409": { description: Department has active users, child units, or open tasks }
+  /admin/config/roles:
+    get:
+      summary: List configurable roles and available permissions
+      security: [{ sessionCookie: [] }]
+      responses:
+        "200": { description: Role and permission catalogue; requires security.role.manage }
+        "403": { description: Permission, MFA, or password-change gate denied access }
+    post:
+      summary: Create an inactive role without permissions
+      security: [{ sessionCookie: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [roleCode, name]
+              properties:
+                roleCode: { type: string, pattern: '^[a-z][a-z0-9_]{1,63}$' }
+                name: { type: string, minLength: 2, maxLength: 190 }
+                description: { type: string, maxLength: 255 }
+      responses:
+        "201": { description: Inactive role created; it has no access until explicitly configured }
+        "400": { description: Invalid role details }
+        "403": { description: Permission, MFA, or password-change gate denied access }
+        "409": { description: Role code already exists }
+  /admin/config/roles/{roleId}:
+    put:
+      summary: Update role details or deactivate the role
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - in: path
+          name: roleId
+          required: true
+          schema: { type: integer, minimum: 1 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, description, status, mfaRequired]
+              properties:
+                name: { type: string, minLength: 2, maxLength: 190 }
+                description: { type: string, maxLength: 255 }
+                status: { type: string, enum: [active, inactive] }
+                mfaRequired: { type: boolean }
+      responses:
+        "200": { description: Role details updated and audit event recorded }
+        "400": { description: Invalid role details or attempt to weaken MFA }
+        "403": { description: Permission, MFA, or password-change gate denied access; system administrator role is protected }
+        "404": { description: Role not found }
+        "409": { description: Inactive roles must be activated through the permission and department assignment workflow }
+  /admin/config/roles/{roleId}/activate:
+    put:
+      summary: Save explicit role permissions and activate with MFA required
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - in: path
+          name: roleId
+          required: true
+          schema: { type: integer, minimum: 1 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, description, facilityId, departmentIds, permissionCodes]
+              properties:
+                name: { type: string, minLength: 2, maxLength: 190 }
+                description: { type: string, maxLength: 255 }
+                facilityId: { type: integer, minimum: 1 }
+                departmentIds: { type: array, minItems: 1, maxItems: 200, items: { type: integer, minimum: 1 } }
+                permissionCodes: { type: array, minItems: 1, maxItems: 100, items: { type: string } }
+      responses:
+        "200": { description: Role permissions, facility-scoped department assignments and activation committed atomically; MFA required }
+        "400": { description: Invalid details, department assignment, unknown permission, or protected permission selected }
+        "403": { description: Permission, MFA, or password-change gate denied access }
+        "404": { description: Role not found }
+  /facilities:
+    get:
+      summary: List facilities assigned to the signed-in user
+      security: [{ sessionCookie: [] }]
+      responses:
+        "200": { description: Facility assignments for the authenticated user }
+        "401": { description: Missing or expired session }
+  /admin/users:
+    post:
+      summary: Provision a staff account with one role and facility assignment
+      security: [{ sessionCookie: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, displayName, temporaryPassword, roleCode, facilityId]
+              properties:
+                username: { type: string, minLength: 3, maxLength: 100 }
+                displayName: { type: string, minLength: 2, maxLength: 190 }
+                temporaryPassword: { type: string, minLength: 6, maxLength: 1024, writeOnly: true }
+                roleCode: { type: string, pattern: '^[a-z][a-z0-9_]{1,63}$' }
+                facilityId: { type: integer, minimum: 1 }
+                departmentCode: { type: string, pattern: '^[A-Z0-9_]{2,64}$' }
+      responses:
+        "201": { description: Account provisioned; password change required at first use }
+        "400": { description: Invalid request }
+        "403": { description: Permission, MFA, or password-change gate denied access }
+        "404": { description: Facility or role is unavailable }
+        "409": { description: Username already exists }
+  /patients/duplicate-candidates:
+    post:
+      summary: Find potential duplicate patient identities
+      description: Facility-scoped exact normalized-name or date-of-birth candidates; never merges records.
+      security: [{ sessionCookie: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/PatientIdentity"
+                - type: object
+                  required: [facilityId]
+                  properties:
+                    facilityId: { type: integer, minimum: 1 }
+      responses:
+        "200": { description: Candidate list (maximum 20), match evidence, and truncation indicator }
+        "400": { description: Invalid identity fields }
+        "403": { description: Permission or facility access denied }
+        "503": { description: Patient encryption or lookup keys are not configured }
+  /patients:
+    post:
+      summary: Register a patient identity
+      description: The server rechecks candidates transactionally at registration; every returned candidate requires an explicit reasoned decision. Same-person review returns a conflict and never merges.
+      security: [{ sessionCookie: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/PatientIdentity"
+                - type: object
+                  required: [facilityId]
+                  properties:
+                    facilityId: { type: integer, minimum: 1 }
+                    duplicateReviews:
+                      type: array
+                      maxItems: 20
+                      items:
+                        type: object
+                        required: [candidatePatientId, disposition, reason]
+                        properties:
+                          candidatePatientId: { type: integer, minimum: 1 }
+                          disposition: { type: string, enum: [same_person, different_person] }
+                          reason: { type: string, minLength: 10, maxLength: 500 }
+      responses:
+        "201": { description: Patient created with a facility-specific record number }
+        "400": { description: Invalid request or incomplete candidate review }
+        "403": { description: Permission or facility access denied }
+        "409": { description: Possible duplicate or same-person decision; no record merged }
+        "503": { description: Patient encryption, lookup key, or MPI lock unavailable }
+  /patients/search:
+    post:
+      summary: Search the facility-scoped MPI
+      description: Search by record number or both given and family names, optionally with date of birth.
+      security: [{ sessionCookie: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [facilityId]
+              properties:
+                facilityId: { type: integer, minimum: 1 }
+                recordNumber: { type: string, maxLength: 40 }
+                givenName: { type: string, maxLength: 100 }
+                familyName: { type: string, maxLength: 100 }
+                dateOfBirth: { type: string, format: date }
+      responses:
+        "200": { description: Up to 20 matching patient identities and truncation indicator }
+        "400": { description: Invalid search request }
+        "403": { description: Permission or facility access denied }
+        "503": { description: Patient encryption or lookup keys are not configured }
+  /patients/{patientId}:
+    get:
+      summary: Read an MPI identity record
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - name: patientId
+          in: path
+          required: true
+          schema: { type: integer, minimum: 1 }
+      responses:
+        "200": { description: Patient identity for an assigned facility }
+        "403": { description: Permission denied }
+        "404": { description: No accessible patient record found }
+  /encounters:
+    get:
+      summary: Read the open encounter queue for an assigned facility
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - name: facilityId
+          in: query
+          required: true
+          schema: { type: integer, minimum: 1 }
+      responses:
+        "200": { description: Up to 100 open encounters; limited to patient record numbers and arrival details }
+        "400": { description: Invalid facility filter }
+        "403": { description: Queue permission or facility access denied }
+    post:
+      summary: Register an OPD or emergency arrival
+      description: >
+        Requires both encounter-registration and MPI-search permissions. Creates
+        an open encounter for an active patient at the assigned facility.
+        Does not perform triage, clinical assessment, or treatment. A UUID
+        Idempotency-Key makes safe retries return the same encounter.
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [facilityId, patientId, encounterType]
+              properties:
+                facilityId: { type: integer, minimum: 1 }
+                patientId: { type: integer, minimum: 1 }
+                encounterType: { type: string, enum: [outpatient, emergency] }
+      responses:
+        "201": { description: Encounter registered }
+        "200": { description: Idempotent replay of the previously registered encounter }
+        "400": { description: Invalid request or idempotency key }
+        "403": { description: Registration permission or facility access denied }
+        "404": { description: Active patient not found at the selected facility }
+        "409": { description: Idempotency key was used for a different request }
+  /encounters/{encounterId}/care-context:
+    parameters:
+      - name: encounterId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      summary: Read authorized cross-department encounter context
+      description: Requires care.context.read and facility assignment. Returns recent encounter history and only the clinical sections permitted to the user and enabled at the facility. Clinical note content, finance data and government integrations are excluded.
+      security: [{ sessionCookie: [] }]
+      responses:
+        "200":
+          description: Up to 50 encounters with explicitly authorized observations, triage, diagnostic-order and inpatient summaries
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [patient, encounters, sections, truncated, truncatedSections]
+                properties:
+                  patient:
+                    type: object
+                    required: [patientId, recordNumber]
+                    properties:
+                      patientId: { type: integer, minimum: 1 }
+                      recordNumber: { type: string }
+                  encounters:
+                    type: array
+                    items:
+                      type: object
+                      required: [encounterId, encounterType, status, openedAt]
+                      properties:
+                        encounterId: { type: string, format: uuid }
+                        encounterType: { type: string, enum: [outpatient, emergency] }
+                        status: { type: string, enum: [open, closed, cancelled] }
+                        openedAt: { type: string, format: date-time }
+                        observations: { type: array, items: { type: object } }
+                        triageAssessments: { type: array, items: { type: object } }
+                        diagnosticOrders: { type: array, items: { type: object } }
+                        admissions: { type: array, items: { type: object } }
+                  sections:
+                    type: array
+                    items: { type: string, enum: [observations, triage, diagnostics, inpatient] }
+                  truncated: { type: boolean }
+                  truncatedSections:
+                    type: array
+                    items: { type: string, enum: [observations, triage, diagnostics, inpatient] }
+        "400": { description: Invalid encounter identifier }
+        "403": { description: Shared-context permission denied }
+        "404": { description: No accessible encounter found }
+  /encounters/{encounterId}/observations:
+    parameters:
+      - name: encounterId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      summary: Read encounter measurements
+      description: >
+        Requires encounter.observation.read and facility access. Returns
+        measurements as entered, with fixed unit labels and recorder timestamp.
+        Does not classify or interpret clinical values.
+      security: [{ sessionCookie: [] }]
+      responses:
+        "200":
+          description: Up to 100 recorded measurement sets
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [observations, truncated]
+                properties:
+                  observations:
+                    type: array
+                    items: { $ref: "#/components/schemas/EncounterObservation" }
+                  truncated: { type: boolean }
+        "400": { description: Invalid encounter identifier }
+        "403": { description: Permission or facility access denied }
+        "404": { description: Encounter not found }
+    post:
+      summary: Append a measurement set to an open encounter
+      description: >
+        Requires encounter.observation.record and facility access. This
+        append-only operation records values and server-side provenance; it
+        does not triage, interpret, alert, diagnose, or recommend treatment.
+        Systolic and diastolic blood pressure must be supplied together.
+        Reuse of an Idempotency-Key returns the original matching record.
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              minProperties: 1
+              additionalProperties: false
+              properties:
+                systolicBpMmhg: { type: number, minimum: 0, maximum: 1000 }
+                diastolicBpMmhg: { type: number, minimum: 0, maximum: 1000 }
+                pulseBpm: { type: number, minimum: 0, maximum: 1000 }
+                respiratoryRateBpm: { type: number, minimum: 0, maximum: 1000 }
+                temperatureCelsius: { type: number, minimum: -100, maximum: 200 }
+                oxygenSaturationPercent: { type: number, minimum: 0, maximum: 100 }
+                weightKg: { type: number, minimum: 0, maximum: 99999.99 }
+                heightCm: { type: number, minimum: 0, maximum: 9999.99 }
+      responses:
+        "201":
+          description: Measurement set appended to the encounter
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ObservationWriteResult" }
+        "200":
+          description: Idempotent replay of the previously recorded set
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ObservationWriteResult" }
+        "400": { description: Invalid measurement or incomplete blood pressure pair }
+        "403": { description: Permission or facility access denied }
+        "404": { description: Encounter not found }
+        "409": { description: Encounter is not open or idempotency key was reused }
+  /encounters/{encounterId}/notes:
+    parameters:
+      - name: encounterId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      summary: Read encounter note versions
+      description: Requires encounter.note.read and facility access; clinical text is decrypted only for this authorized response.
+      security: [{ sessionCookie: [] }]
+      responses:
+        "200":
+          description: Up to 100 drafts and signed note versions
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [notes, truncated]
+                properties:
+                  notes:
+                    type: array
+                    items: { $ref: "#/components/schemas/ClinicalNote" }
+                  truncated: { type: boolean }
+        "400": { description: Invalid encounter identifier }
+        "403": { description: Permission or facility access denied }
+        "404": { description: Encounter not found }
+        "503": { description: Clinical encryption key is not configured }
+    post:
+      summary: Create an encrypted clinical note draft
+      description: Requires encounter.note.create and an open encounter. Note titles and contents are encrypted at rest. Draft is not signed or a substitute for approved clinical protocols.
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [noteType, title, content]
+              properties:
+                noteType: { type: string, enum: [clinical, nursing, handover, other] }
+                title: { type: string, minLength: 1, maxLength: 160 }
+                content: { type: string, minLength: 1, maxLength: 8000, writeOnly: true }
+      responses:
+        "201": { description: Draft created }
+        "200": { description: Idempotent replay of the original draft }
+        "400": { description: Invalid draft or idempotency key }
+        "403": { description: Permission or facility access denied }
+        "404": { description: Encounter not found }
+        "409": { description: Encounter is not open or request key was reused }
+        "503": { description: Clinical encryption key is not configured }
+  /encounters/{encounterId}/notes/{noteId}:
+    parameters:
+      - name: encounterId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+      - name: noteId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    put:
+      summary: Update an unsigned note draft
+      description: Only the original author may edit their draft. Signed note versions are immutable.
+      security: [{ sessionCookie: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [noteType, title, content]
+              properties:
+                noteType: { type: string, enum: [clinical, nursing, handover, other] }
+                title: { type: string, minLength: 1, maxLength: 160 }
+                content: { type: string, minLength: 1, maxLength: 8000, writeOnly: true }
+      responses:
+        "200": { description: Draft updated; edit audit event recorded }
+        "400": { description: Invalid draft }
+        "403": { description: Permission or facility access denied }
+        "404": { description: Encounter or note not found }
+        "409": { description: Note is signed or does not belong to the requesting author }
+        "503": { description: Clinical encryption key is not configured }
+  /encounters/{encounterId}/notes/{noteId}/sign:
+    parameters:
+      - name: encounterId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+      - name: noteId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      summary: Sign the author's draft
+      description: Requires encounter.note.sign; only the original author can sign their draft. Signing locks content; corrections use a reasoned amendment.
+      security: [{ sessionCookie: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: false }
+      responses:
+        "200": { description: Note signed with authenticated signer and timestamp }
+        "400": { description: Invalid encounter or note identifier }
+        "403": { description: Permission or facility access denied }
+        "404": { description: Encounter or note not found }
+        "409": { description: Note cannot be signed in its current state }
+  /encounters/{encounterId}/notes/{noteId}/amendments:
+    parameters:
+      - name: encounterId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+      - name: noteId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      summary: Create a reasoned amendment draft
+      description: Requires encounter.note.amend. Appends a new draft version linked to the latest signed version; prior signed content is never overwritten.
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [noteType, title, content, reason]
+              properties:
+                noteType: { type: string, enum: [clinical, nursing, handover, other] }
+                title: { type: string, minLength: 1, maxLength: 160 }
+                content: { type: string, minLength: 1, maxLength: 8000, writeOnly: true }
+                reason: { type: string, minLength: 10, maxLength: 1000, writeOnly: true }
+      responses:
+        "201": { description: Amendment draft created as a new immutable-history version }
+        "200": { description: Idempotent replay of the amendment draft }
+        "400": { description: Invalid amendment or idempotency key }
+        "403": { description: Permission or facility access denied }
+        "404": { description: Encounter or note not found }
+        "409": { description: Target note is not latest signed version or key was reused }
+        "503": { description: Clinical encryption key is not configured }
+  /diagnostics/facilities/{facilityId}/services:
+    parameters:
+      - name: facilityId
+        in: path
+        required: true
+        schema: { type: integer, minimum: 1 }
+    get:
+      summary: Read approved diagnostic service catalog
+      description: Requires diagnostics.catalog.read, facility assignment, and the facility diagnostics activation gate. No catalog entries are seeded by this release.
+      security: [{ sessionCookie: [] }]
+      responses:
+        "200":
+          description: Active, locally configured services
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [services, truncated]
+                properties:
+                  services:
+                    type: array
+                    items: { $ref: "#/components/schemas/DiagnosticService" }
+                  truncated: { type: boolean }
+        "403": { description: Permission or facility access denied }
+        "404": { description: Facility not found }
+        "503": { description: Diagnostics are disabled pending facility workflow approval and activation }
+  /diagnostics/encounters/{encounterId}/orders:
+    parameters:
+      - name: encounterId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      summary: Read diagnostic orders for an encounter
+      description: Requires diagnostics.order.read, facility assignment, and an enabled facility diagnostics workflow.
+      security: [{ sessionCookie: [] }]
+      responses:
+        "200":
+          description: Up to 100 orders and cancellations
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [orders, truncated]
+                properties:
+                  orders:
+                    type: array
+                    items: { $ref: "#/components/schemas/DiagnosticOrder" }
+                  truncated: { type: boolean }
+        "403": { description: Permission or facility access denied }
+        "404": { description: Encounter not found }
+        "503": { description: Diagnostics are disabled pending facility workflow approval and activation }
+    post:
+      summary: Place an order for an approved local diagnostic service
+      description: Requires diagnostics.order.create and an open encounter. The facility diagnostics gate must be enabled with recorded workflow approval. This scaffold does not implement results, interpretation, specimen workflow, or external connections.
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [serviceId]
+              properties:
+                serviceId: { type: string, format: uuid }
+      responses:
+        "201": { description: Diagnostic order created and audited }
+        "200": { description: Idempotent replay of the original order }
+        "400": { description: Invalid encounter, service, or idempotency key }
+        "403": { description: Permission or facility access denied }
+        "404": { description: Encounter or active service not found }
+        "409": { description: Encounter is not open or request key was reused }
+        "503": { description: Diagnostics are disabled pending facility workflow approval and activation }
+  /diagnostics/orders/{orderId}/cancel:
+    parameters:
+      - name: orderId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      summary: Cancel an unfulfilled diagnostic order
+      description: Requires diagnostics.order.cancel, facility assignment, and an enabled facility diagnostics workflow. Cancellation is audited and does not delete the order.
+      security: [{ sessionCookie: [] }]
+      responses:
+        "200": { description: Order cancelled or idempotent replay of an existing cancellation }
+        "403": { description: Permission or facility access denied }
+        "404": { description: Order not found }
+        "503": { description: Diagnostics are disabled pending facility workflow approval and activation }
+  /inpatient/facilities/{facilityId}/locations:
+    parameters:
+      - name: facilityId
+        in: path
+        required: true
+        schema: { type: integer, minimum: 1 }
+    get:
+      summary: Read approved ward and bed locations
+      description: Requires inpatient.catalog.read, facility assignment, and the facility inpatient activation gate. No wards or beds are seeded.
+      security: [{ sessionCookie: [] }]
+      responses:
+        "200":
+          description: Active locally configured locations
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [wards, truncated]
+                properties:
+                  wards:
+                    type: array
+                    items: { $ref: "#/components/schemas/InpatientWard" }
+                  truncated: { type: boolean }
+        "403": { description: Permission or facility access denied }
+        "404": { description: Facility not found }
+        "503": { description: Inpatient workflows are disabled pending facility approval and activation }
+  /inpatient/encounters/{encounterId}/admissions:
+    parameters:
+      - name: encounterId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      summary: Read admissions linked to an encounter
+      security: [{ sessionCookie: [] }]
+      responses:
+        "200":
+          description: Up to 100 admission records
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [admissions, truncated]
+                properties:
+                  admissions:
+                    type: array
+                    items: { $ref: "#/components/schemas/InpatientAdmission" }
+                  truncated: { type: boolean }
+        "403": { description: Permission or facility access denied }
+        "404": { description: Encounter not found }
+        "503": { description: Inpatient workflows are disabled pending facility approval and activation }
+    post:
+      summary: Create an admission from an open encounter
+      description: Requires inpatient.admission.create and an enabled facility workflow. Admission has no implied ward, acuity, or bed capacity.
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: false }
+      responses:
+        "201": { description: Admission created and audited }
+        "200": { description: Idempotent replay of the original admission }
+        "400": { description: Invalid encounter or idempotency key }
+        "403": { description: Permission or facility access denied }
+        "404": { description: Encounter not found }
+        "409": { description: Encounter is not open or an active admission already exists }
+        "503": { description: Inpatient workflows are disabled pending facility approval and activation }
+  /inpatient/admissions/{admissionId}/bed-assignments:
+    parameters:
+      - name: admissionId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      summary: Assign or transfer an active admission to a bed
+      description: Requires inpatient.bed.assign and an active, locally approved bed. The transaction closes a prior assignment when transferring and prevents simultaneous assignments to the same bed or admission. This scaffold does not infer capacity, acuity, or ward-specific rules.
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [bedId]
+              properties:
+                bedId: { type: string, format: uuid }
+      responses:
+        "201": { description: Bed assignment or transfer recorded and audited }
+        "200": { description: Idempotent replay of the assignment }
+        "400": { description: Invalid admission, bed, or idempotency key }
+        "403": { description: Permission or facility access denied }
+        "404": { description: Admission or active bed not found }
+        "409": { description: Admission is discharged, bed is occupied, or request key was reused }
+        "503": { description: Inpatient workflows are disabled pending facility approval and activation }
+  /inpatient/admissions/{admissionId}/discharge:
+    parameters:
+      - name: admissionId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      summary: Discharge an active admission
+      description: Requires inpatient.admission.discharge and an enabled facility workflow. Any active bed assignment is ended in the same transaction. No discharge summary or clinical decision support is generated.
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: false }
+      responses:
+        "200": { description: Admission discharged, or idempotent replay }
+        "400": { description: Invalid admission or idempotency key }
+        "403": { description: Permission or facility access denied }
+        "404": { description: Admission not found }
+        "409": { description: Admission was already discharged with a different request key }
+        "503": { description: Inpatient workflows are disabled pending facility approval and activation }
+  /finance/encounters/{encounterId}/charges:
+    parameters:
+      - name: encounterId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      summary: Read manually recorded encounter charges
+      description: Requires finance.charge.read, facility access, finance-department assignment, encryption configuration, and the facility finance activation gate.
+      security: [{ sessionCookie: [] }]
+      responses:
+        "200":
+          description: Up to 100 charges
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [charges, truncated]
+                properties:
+                  charges:
+                    type: array
+                    items: { $ref: "#/components/schemas/FinanceCharge" }
+                  truncated: { type: boolean }
+        "403": { description: Permission or facility access denied }
+        "404": { description: Encounter not found }
+        "503": { description: Finance is disabled or encryption is unavailable }
+    post:
+      summary: Record a manual payer-neutral charge
+      description: Requires finance.charge.create, finance-department assignment, and an open encounter. This does not calculate tariffs, establish coverage, or promise reimbursement. Description is encrypted at rest.
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [chargeCode, description, amount, currencyCode]
+              properties:
+                chargeCode: { type: string, pattern: '^[A-Z0-9][A-Z0-9._-]{0,63}$' }
+                description: { type: string, minLength: 1, maxLength: 190, writeOnly: true }
+                amount: { type: string, pattern: '^(?:0|[1-9][0-9]{0,10})(?:\.[0-9]{1,2})?$', example: "1250.50" }
+                currencyCode: { type: string, pattern: '^[A-Z]{3}$' }
+      responses:
+        "201": { description: Manual charge recorded and audited }
+        "200": { description: Idempotent replay of the original charge }
+        "400": { description: Invalid charge or idempotency key }
+        "403": { description: Permission or facility access denied }
+        "404": { description: Encounter not found }
+        "409": { description: Encounter is not open or request key was reused }
+        "503": { description: Finance is disabled or encryption is unavailable }
+  /finance/encounters/{encounterId}/invoices:
+    parameters:
+      - name: encounterId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      summary: List issued encounter invoices
+      security: [{ sessionCookie: [] }]
+      responses:
+        "200":
+          description: Up to 100 invoice summaries
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [invoices, truncated]
+                properties:
+                  invoices:
+                    type: array
+                    items: { $ref: "#/components/schemas/FinanceInvoiceSummary" }
+                  truncated: { type: boolean }
+        "403": { description: Permission or facility access denied }
+        "404": { description: Encounter not found }
+        "503": { description: Finance is disabled or encryption is unavailable }
+    post:
+      summary: Issue an invoice from unbilled charges
+      description: Requires finance.invoice.create, finance-department assignment, and an enabled facility finance workflow. Issues from up to 500 oldest unbilled charges in the requested currency using exact decimal arithmetic. No tariff, payer, eligibility, claim, payment, or SHA rules are applied.
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [currencyCode]
+              properties:
+                currencyCode: { type: string, pattern: '^[A-Z]{3}$' }
+      responses:
+        "201": { description: Invoice issued from unbilled charges; charge and invoice lines committed atomically }
+        "200": { description: Idempotent replay of the original invoice }
+        "400": { description: Invalid encounter, currency or idempotency key }
+        "403": { description: Permission or facility access denied }
+        "404": { description: Encounter not found }
+        "409": { description: Encounter cancelled, no unbilled charges or request conflict }
+        "503": { description: Finance is disabled or encryption is unavailable }
+  /finance/invoices/{invoiceId}:
+    parameters:
+      - name: invoiceId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      summary: Read an issued invoice and its append-only adjustments
+      security: [{ sessionCookie: [] }]
+      responses:
+        "200":
+          description: Invoice with encrypted descriptions decrypted for the authorized response
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [invoice]
+                properties:
+                  invoice: { $ref: "#/components/schemas/FinanceInvoice" }
+        "403": { description: Permission or facility access denied }
+        "404": { description: Invoice not found }
+        "503": { description: Finance is disabled or encryption is unavailable }
+  /finance/invoices/{invoiceId}/adjustments:
+    parameters:
+      - name: invoiceId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      summary: Append an audited invoice debit or credit adjustment
+      description: Requires finance.adjustment.create and finance-department assignment. The adjustment reason is encrypted at rest. Adjustments do not represent a payment, refund, claim, or adjudication.
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [adjustmentType, amount, reason]
+              properties:
+                adjustmentType: { type: string, enum: [debit, credit] }
+                amount: { type: string, pattern: '^(?:0|[1-9][0-9]{0,10})(?:\.[0-9]{1,2})?$' }
+                reason: { type: string, minLength: 10, maxLength: 500, writeOnly: true }
+      responses:
+        "201": { description: Adjustment appended and audited }
+        "200": { description: Idempotent replay of the original adjustment }
+        "400": { description: Invalid adjustment or idempotency key }
+        "403": { description: Permission or facility access denied }
+        "404": { description: Invoice not found }
+        "409": { description: Request key was reused }
+        "503": { description: Finance is disabled or encryption is unavailable }
+  /triage/queue:
+    get:
+      summary: Read open encounters and triage assessments awaiting review
+      description: Requires triage.queue.read, an assigned facility triage department, and an enabled approved facility workflow. No acuity or urgency classification is returned.
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - name: facilityId
+          in: query
+          required: true
+          schema: { type: integer, minimum: 1 }
+      responses:
+        "200": { description: Open arrivals and pending observation-review items for the assigned triage department }
+        "400": { description: Invalid facility selection }
+        "403": { description: Facility or department access denied }
+        "503": { description: Triage workflow is disabled }
+  /workflow/facilities/{facilityId}/departments:
+    parameters:
+      - name: facilityId
+        in: path
+        required: true
+        schema: { type: integer, minimum: 1 }
+    get:
+      summary: List active facility departments and the caller's assignments
+      description: Requires workflow.task.read and facility access. The Level 5 catalogue seeded for DEMO-L5 is synthetic and does not represent licensed or operating services.
+      security: [{ sessionCookie: [] }]
+      responses:
+        "200": { description: Department identifiers, codes, names and assigned_to_user flags }
+        "400": { description: Invalid facility identifier }
+        "403": { description: Facility access denied }
+  /workflow/departments/{departmentId}/tasks:
+    parameters:
+      - name: departmentId
+        in: path
+        required: true
+        schema: { type: integer, minimum: 1 }
+    get:
+      summary: Read tasks sent to or received by an assigned department
+      description: Requires workflow.task.read, facility access, department assignment and configured workflow encryption.
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - name: facilityId
+          in: query
+          required: true
+          schema: { type: integer, minimum: 1 }
+        - name: status
+          in: query
+          required: false
+          schema: { type: string, enum: [requested, accepted, in_progress, completed, rejected, cancelled] }
+      responses:
+        "200": { description: Up to 100 matching tasks and a truncation flag }
+        "400": { description: Invalid facility, department or status }
+        "403": { description: Facility or department access denied }
+        "503": { description: Workflow encryption is unavailable }
+  /workflow/encounters/{encounterId}/tasks:
+    parameters:
+      - name: encounterId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      summary: Read department tasks attached to an encounter
+      description: Requires workflow.task.read, facility access, assignment to a participating department and configured workflow encryption.
+      security: [{ sessionCookie: [] }]
+      responses:
+        "200": { description: Tasks visible to the caller's assigned departments }
+        "400": { description: Invalid encounter identifier }
+        "503": { description: Workflow encryption is unavailable }
+    post:
+      summary: Create a department-routed workflow task
+      description: Requires workflow.task.create and assignment to the sending department. This records a routed task only; it does not place diagnostic orders, dispense medication or document a completed clinical procedure.
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [sendingDepartmentId, receivingDepartmentId, taskType, title, details]
+              properties:
+                sendingDepartmentId: { type: integer, minimum: 1 }
+                receivingDepartmentId: { type: integer, minimum: 1 }
+                taskType: { type: string, enum: [consultation, diagnostic, medication, procedure, referral, handover, other] }
+                title: { type: string, minLength: 3, maxLength: 160 }
+                details: { type: string, minLength: 1, maxLength: 1000, writeOnly: true }
+      responses:
+        "201": { description: Task created with an initial event }
+        "200": { description: Idempotent replay of the matching task }
+        "400": { description: Invalid task or idempotency key }
+        "403": { description: Permission, facility or sending-department access denied }
+        "404": { description: Encounter or department not found }
+        "409": { description: Closed encounter or idempotency conflict }
+        "503": { description: Workflow encryption is unavailable }
+  /workflow/tasks/{taskId}:
+    parameters:
+      - name: taskId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      summary: Read a task and its immutable event history
+      description: Requires workflow.task.read and assignment to the task's sending or receiving department. Event notes and task details are encrypted at rest.
+      security: [{ sessionCookie: [] }]
+      responses:
+        "200": { description: Task and ordered transition history }
+        "404": { description: Task not found or not visible to this user }
+        "503": { description: Workflow encryption is unavailable }
+  /workflow/tasks/{taskId}/transitions:
+    parameters:
+      - name: taskId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      summary: Accept, reject, progress, complete or cancel a task
+      description: Requires workflow.task.respond for receiver actions or workflow.task.create to cancel a request from the assigned sending department. Rejection requires a reason of at least 10 characters.
+      security: [{ sessionCookie: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [action]
+              properties:
+                action: { type: string, enum: [accept, reject, start, complete, cancel] }
+                note: { type: string, minLength: 1, maxLength: 1000, writeOnly: true }
+      responses:
+        "200": { description: Task transitioned and event appended }
+        "400": { description: Invalid action or transition note }
+        "403": { description: Permission, facility or department access denied }
+        "404": { description: Task not found or not visible to this user }
+        "409": { description: Current task state does not permit the requested transition }
+        "503": { description: Workflow encryption is unavailable }
+  /triage/encounters/{encounterId}/assessments:
+    parameters:
+      - name: encounterId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      summary: Capture triage observations for clinician review
+      description: Requires triage.assessment.capture and triage department assignment. Appends measurements and a pending review item. No acuity score, diagnosis, recommendation or escalation is generated.
+      security: [{ sessionCookie: [] }]
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              minProperties: 1
+              properties:
+                systolicBpMmhg: { type: number, minimum: 0, maximum: 1000 }
+                diastolicBpMmhg: { type: number, minimum: 0, maximum: 1000 }
+                pulseBpm: { type: number, minimum: 0, maximum: 1000 }
+                respiratoryRateBpm: { type: number, minimum: 0, maximum: 1000 }
+                temperatureCelsius: { type: number, minimum: -100, maximum: 200 }
+                oxygenSaturationPercent: { type: number, minimum: 0, maximum: 100 }
+                weightKg: { type: number, minimum: 0, maximum: 99999.99 }
+                heightCm: { type: number, minimum: 0, maximum: 9999.99 }
+              description: At least one measurement is required; systolic and diastolic BP must be supplied together.
+      responses:
+        "201": { description: Observation and pending review item recorded atomically }
+        "200": { description: Idempotent replay }
+        "400": { description: Invalid measurements or idempotency key }
+        "403": { description: Permission, facility or department access denied }
+        "404": { description: Encounter not found }
+        "409": { description: Encounter closed, conflicting retry, or another triage review is pending }
+        "503": { description: Triage workflow is disabled }
+  /triage/assessments/{triageId}/review:
+    parameters:
+      - name: triageId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      summary: Acknowledge a triage assessment as reviewed
+      description: Requires triage.assessment.review and triage department assignment. Acknowledgement changes workflow state only and does not assign acuity or disposition.
+      security: [{ sessionCookie: [] }]
+      responses:
+        "200": { description: Assessment acknowledged or idempotently replayed }
+        "403": { description: Permission, facility or department access denied }
+        "404": { description: Triage assessment not found }
+        "409": { description: Assessment has already been reviewed by another clinician }
+        "503": { description: Triage workflow is disabled }
+components:
+  securitySchemes:
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: imis_session
+  schemas:
+    ObservationWriteResult:
+      type: object
+      required: [observation, idempotentReplay]
+      properties:
+        observation: { $ref: "#/components/schemas/EncounterObservation" }
+        idempotentReplay: { type: boolean }
+    ClinicalNote:
+      type: object
+      required: [noteId, rootNoteId, encounterId, recordNumber, noteType, title, content, status, version, authoredByUserId, authoredBy, createdAt, updatedAt]
+      properties:
+        noteId: { type: string, format: uuid }
+        rootNoteId: { type: string, format: uuid }
+        parentNoteId: { type: [string, "null"], format: uuid }
+        encounterId: { type: string, format: uuid }
+        recordNumber: { type: string }
+        noteType: { type: string, enum: [clinical, nursing, handover, other] }
+        title: { type: string }
+        content: { type: string }
+        status: { type: string, enum: [draft, signed] }
+        version: { type: integer, minimum: 1 }
+        amendmentReason: { type: [string, "null"] }
+        authoredByUserId: { type: integer }
+        authoredBy: { type: string }
+        signedByUserId: { type: [integer, "null"] }
+        signedBy: { type: [string, "null"] }
+        signedAt: { type: [string, "null"], format: date-time }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    DiagnosticService:
+      type: object
+      required: [serviceId, serviceCode, displayName, categoryCode]
+      properties:
+        serviceId: { type: string, format: uuid }
+        serviceCode: { type: string }
+        displayName: { type: string }
+        categoryCode: { type: string, description: Facility-defined category code; no national terminology is assumed. }
+    DiagnosticOrder:
+      type: object
+      required: [orderId, encounterId, recordNumber, serviceId, serviceCode, serviceName, categoryCode, status, requestedByUserId, requestedBy, requestedAt]
+      properties:
+        orderId: { type: string, format: uuid }
+        encounterId: { type: string, format: uuid }
+        recordNumber: { type: string }
+        serviceId: { type: string, format: uuid }
+        serviceCode: { type: string }
+        serviceName: { type: string }
+        categoryCode: { type: string }
+        status: { type: string, enum: [ordered, cancelled] }
+        requestedByUserId: { type: integer }
+        requestedBy: { type: string }
+        requestedAt: { type: string, format: date-time }
+        cancelledByUserId: { type: [integer, "null"] }
+        cancelledBy: { type: [string, "null"] }
+        cancelledAt: { type: [string, "null"], format: date-time }
+    InpatientWard:
+      type: object
+      required: [wardId, wardCode, wardName, beds]
+      properties:
+        wardId: { type: string, format: uuid }
+        wardCode: { type: string }
+        wardName: { type: string }
+        beds:
+          type: array
+          items:
+            type: object
+            required: [bedId, bedCode]
+            properties:
+              bedId: { type: string, format: uuid }
+              bedCode: { type: string }
+    InpatientAdmission:
+      type: object
+      required: [admissionId, encounterId, recordNumber, status, admittedByUserId, admittedBy, admittedAt, dischargedByUserId, dischargedBy, dischargedAt, currentBed]
+      properties:
+        admissionId: { type: string, format: uuid }
+        encounterId: { type: string, format: uuid }
+        recordNumber: { type: string }
+        status: { type: string, enum: [active, discharged] }
+        admittedByUserId: { type: integer }
+        admittedBy: { type: string }
+        admittedAt: { type: string, format: date-time }
+        dischargedByUserId: { type: [integer, "null"] }
+        dischargedBy: { type: [string, "null"] }
+        dischargedAt: { type: [string, "null"], format: date-time }
+        currentBed:
+          oneOf:
+            - type: "null"
+            - type: object
+              required: [bedId, bedCode, wardId, wardCode, wardName]
+              properties:
+                bedId: { type: string, format: uuid }
+                bedCode: { type: string }
+                wardId: { type: string, format: uuid }
+                wardCode: { type: string }
+                wardName: { type: string }
+    FinanceCharge:
+      type: object
+      required: [chargeId, encounterId, recordNumber, chargeCode, description, amount, currencyCode, status, recordedByUserId, recordedBy, recordedAt]
+      properties:
+        chargeId: { type: string, format: uuid }
+        encounterId: { type: string, format: uuid }
+        recordNumber: { type: string }
+        chargeCode: { type: string }
+        description: { type: string }
+        amount: { type: string, pattern: '^[0-9]+\.[0-9]{2}$' }
+        currencyCode: { type: string, pattern: '^[A-Z]{3}$' }
+        status: { type: string, enum: [unbilled, invoiced] }
+        recordedByUserId: { type: integer }
+        recordedBy: { type: string }
+        recordedAt: { type: string, format: date-time }
+    FinanceInvoiceSummary:
+      type: object
+      required: [invoiceId, encounterId, recordNumber, currencyCode, status, subtotalAmount, adjustmentNetAmount, totalAmount, issuedByUserId, issuedBy, issuedAt]
+      properties:
+        invoiceId: { type: string, format: uuid }
+        encounterId: { type: string, format: uuid }
+        recordNumber: { type: string }
+        currencyCode: { type: string, pattern: '^[A-Z]{3}$' }
+        status: { type: string, enum: [issued] }
+        subtotalAmount: { type: string }
+        adjustmentNetAmount: { type: string }
+        totalAmount: { type: string }
+        issuedByUserId: { type: integer }
+        issuedBy: { type: string }
+        issuedAt: { type: string, format: date-time }
+    FinanceInvoice:
+      allOf:
+        - $ref: "#/components/schemas/FinanceInvoiceSummary"
+        - type: object
+          required: [lines, adjustments]
+          properties:
+            lines:
+              type: array
+              items:
+                type: object
+                required: [chargeCode, description, amount, currencyCode]
+                properties:
+                  chargeCode: { type: string }
+                  description: { type: string }
+                  amount: { type: string }
+                  currencyCode: { type: string }
+            adjustments:
+              type: array
+              items:
+                type: object
+                required: [adjustmentId, adjustmentType, amount, reason, createdByUserId, createdBy, createdAt]
+                properties:
+                  adjustmentId: { type: string, format: uuid }
+                  adjustmentType: { type: string, enum: [debit, credit] }
+                  amount: { type: string }
+                  reason: { type: string }
+                  createdByUserId: { type: integer }
+                  createdBy: { type: string }
+                  createdAt: { type: string, format: date-time }
+    EncounterObservation:
+      type: object
+      required: [observationId, encounterId, recordNumber, recordedBy, recordedAt]
+      properties:
+        observationId: { type: string, format: uuid }
+        encounterId: { type: string, format: uuid }
+        recordNumber: { type: string }
+        recordedBy: { type: string }
+        recordedAt: { type: string, format: date-time }
+        systolicBpMmhg: { type: [number, "null"] }
+        diastolicBpMmhg: { type: [number, "null"] }
+        pulseBpm: { type: [number, "null"] }
+        respiratoryRateBpm: { type: [number, "null"] }
+        temperatureCelsius: { type: [number, "null"] }
+        oxygenSaturationPercent: { type: [number, "null"] }
+        weightKg: { type: [number, "null"] }
+        heightCm: { type: [number, "null"] }
+    MfaCode:
+      type: object
+      required: [code]
+      properties:
+        code: { type: string, pattern: '^[0-9]{6}$' }
+    PatientIdentity:
+      type: object
+      required: [givenName, familyName, dateOfBirth, sexAtRegistration]
+      properties:
+        givenName: { type: string, minLength: 1, maxLength: 100 }
+        familyName: { type: string, minLength: 1, maxLength: 100 }
+        dateOfBirth: { type: string, format: date }
+        sexAtRegistration:
+          type: string
+          enum: [female, male, intersex, unknown, not_recorded]

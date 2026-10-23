@@ -1,0 +1,27 @@
+{
+  "name": "kenya-level5-ihis",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "workspaces": [
+    "apps/api",
+    "apps/web"
+  ],
+  "scripts": {
+    "dev": "concurrently -k -n api,web -c green,blue \"npm:dev:api\" \"npm:dev:web\"",
+    "dev:api": "npm --workspace @imis/api run dev",
+    "dev:web": "npm --workspace @imis/web run dev",
+    "build": "npm run build --workspace @imis/api && npm run build --workspace @imis/web",
+    "typecheck": "npm run typecheck --workspace @imis/api && npm run typecheck --workspace @imis/web",
+    "lint": "npm run lint --workspace @imis/api && npm run lint --workspace @imis/web",
+    "test": "npm run test --workspace @imis/api && npm run test --workspace @imis/web",
+    "db:migrate": "npm --workspace @imis/api run db:migrate",
+    "db:seed:admin": "npm --workspace @imis/api run db:seed:admin"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.35.0",
+    "concurrently": "^9.2.1",
+    "globals": "^16.4.0",
+    "typescript-eslint": "^8.43.0"
+  }
+}

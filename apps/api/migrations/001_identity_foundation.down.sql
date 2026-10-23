@@ -1,0 +1,11 @@
+DROP TABLE IF EXISTS audit_events;
+DROP TABLE IF EXISTS sessions;
+DROP TABLE IF EXISTS user_facilities;
+DROP TABLE IF EXISTS role_permissions;
+DROP TABLE IF EXISTS user_roles;
+DROP TABLE IF EXISTS permissions;
+DROP TABLE IF EXISTS roles;
+DROP TABLE IF EXISTS users;
+DROP TABLE IF EXISTS departments;
+DROP TABLE IF EXISTS facilities;
+DROP TABLE IF EXISTS schema_migrations;
